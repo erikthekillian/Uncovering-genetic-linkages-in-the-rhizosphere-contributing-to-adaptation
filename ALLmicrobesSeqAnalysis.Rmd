@@ -1,0 +1,1468 @@
+---
+title: "ALLSeqAnalysis"
+author: "Erik Killian"
+date: "2024-03-28"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+## Setup
+```{r setup, include=FALSE, warning=FALSE, message=FALSE}
+setwd("C:/Users/killi/OneDrive - Montana State University/Documents/Projects/Field_Combined")
+#setwd("/Users/erikkillian/Library/CloudStorage/OneDrive-MontanaStateUniversity/Documents/Projects/Field_Combined")
+
+library(ggplot2)
+library(knitr)
+library(gridExtra)
+library(dada2)
+library(phyloseq)
+library(microbiome)
+library(vegan)
+library(dplyr)
+library(plyr)
+library(tidyverse)
+library(file2meco)
+library(ggordiplots)
+library(randomForest)
+library(microeco)
+library(ggh4x)
+
+```
+
+```{r creating psField (one and done), eval=FALSE}
+ps2021 = readRDS("C:/Users/killi/OneDrive - Montana State University/Documents/Projects/2021_Field/Bacteria/2021Phyloseq.RDS")
+ps2022 = readRDS("C:/Users/killi/OneDrive - Montana State University/Documents/Projects/2022_Field/2022Phyloseq.RDS")
+HFA = read.csv("C:/Users/killi/OneDrive - Montana State University/Documents/Projects/rHFA/HFA_results.csv")
+
+ps2021 = phyloseq(otu_table(ps2021),tax_table(ps2021),sample_data(ps2021), refseq(ps2021))
+sample_names(ps2021) = paste("2021",sample_names(ps2021),sep = "_")
+
+ps2022 = phyloseq(otu_table(ps2022),tax_table(ps2022),sample_data(ps2022),refseq(ps2022))
+sample_names(ps2022) = paste("2022",sample_names(ps2022),sep = "_")
+
+psField = merge_phyloseq(ps2021,ps2022)
+
+tax_table(psField)[row.names(tax_table(psField)) == "ASV753",]
+f = as.data.frame(tax_table(psField)[tax_table(psField)[,"Genus"] == "Blastococcus",])
+f = f[!is.na(f),]
+
+i = as.data.frame(tax_table(ps2021)[tax_table(ps2021)[,"Genus"] == "Blastococcus",])
+i = i[!is.na(i),]
+
+ii = as.data.frame(tax_table(ps2022)[tax_table(ps2022)[,"Genus"] == "Blastococcus",])
+ii = ii[!is.na(ii),]
+
+x = as.data.frame(tax_table(psField))
+x = x[x$Genus == "Blastococcus",]
+x = x[!is.na(x),]
+x[row.names(x) == "ASV753",]
+
+
+
+identical(psField,ps2022)
+
+library("ape")
+random_tree = rtree(ntaxa(psField), rooted=TRUE, tip.label=taxa_names(psField))
+psField <- merge_phyloseq(psField, random_tree)
+
+
+# Fixing sample data
+x = sample_data(psField)
+x$Line[grepl("B", x$Plot)] = "Bulk"
+class(x) = "data.frame"
+str(x)
+y = merge(x, HFA, by.x = "Line", by.y = "Line", all.x = TRUE)
+y = subset(y, select = -c(HFA))
+colnames(y)[colnames(y) == "Location.y"] = "HomeSite" # Homesite defined through HFA calculation using 2021-2022 site years. 
+
+BP = y[!is.na(y$breeding_program),]
+BP = BP[,c("Line","breeding_program")]
+BP = unique(BP)
+
+y = merge(y,BP, by = "Line", all.x = TRUE)
+y = subset(y, select = -c(breeding_program.x))
+colnames(y)[colnames(y) == "breeding_program.y"] = "BreedingProgram"
+colnames(y)[colnames(y) == "Location.x"] = "Location"
+
+
+row.names(y) = paste(y$Year,y$Location,y$Plot, sep = "_")
+
+
+sample_data(psField) = x
+
+
+# Bulk phyloseq
+psBulk = subset_samples(psField, Line == "Bulk")
+View(sample_data(psBulk))
+#saveRDS(psBulk, "psBulk.RDS")
+```
+## LOAD HERE
+```{r LOAD HERE}
+
+psField = readRDS("psField.RDS")
+#pss = readRDS("psField_Genus.RDS")
+psBulk = readRDS("psBulk.RDS")
+
+ps1 = readRDS("ps1.RDS")
+ps1 =readRDS("/Users/erikkillian/Library/CloudStorage/OneDrive-MontanaStateUniversity/Documents/Projects/Field_Combined/ps1.RDS")
+#psm_summarized = readRDS("psm_summarized.RDS")
+psf = readRDS("psf.RDS")
+
+its = readRDS("C:/Users/killi/OneDrive - Montana State University/Documents/Projects/Field_Combined/ITS/Processing/2022_combined.RDS")
+```
+
+## CHAPTER 1: BASIC ANALYSES
+```{r Rarefication}
+# Map read depth of all samples
+readDepth = as.data.frame(rowSums(otu_table(psField)))
+readDepth$Location = as.factor(substr(row.names(readDepth),6,7))
+readDepth$Year = as.factor(substr(row.names(readDepth),1,4))
+colnames(readDepth)[1] = "Reads"
+
+# Remove lines with < 10,000 read depth
+lines10k = readDepth[readDepth$Reads >=10000,]
+lines10k = merge(lines10k, sample_data(psField), by = "row.names")
+sample_data(psField)$Row.names = row.names(sample_data(psField))
+
+ps.lines10k = psField %>%
+  subset_samples(Row.names %in% lines10k$Row.names)
+
+psField = ps.lines10k
+
+nrow(sample_data(psField))
+nrow(sample_data(ps.lines10k)) # Lost ~80 samples across all 7 location years.
+# Which samples did I lose?
+
+#saveRDS(psField, "psField.RDS")
+
+```
+
+```{r Alpha Diversity, message=FALSE,warning=FALSE, fig.height=5,fig.width=10}
+#################
+# Alpha Diversity
+#################
+a = microbiome::alpha(psField, index = "Observed")
+samdata = as.data.frame(sample_data(psField))
+alphaStat = merge(samdata,a, by = "row.names")
+
+balphaStat = alphaStat %>%
+  filter(grepl("B", Plot))
+
+alphaStat <- subset(alphaStat, !grepl("B",Plot))
+
+###
+#PLOTS 
+###
+ggplot(data = alphaStat[!is.na(alphaStat$Block),], aes(x = factor(Block, levels = c(1,2,3,4,5,6,7,8,9,10,11,12)), y = observed, fill = Location)) + geom_boxplot() + facet_grid(~ Year, scales = "free_x") +  
+  xlab("Block") + 
+  ylab("Observed Diversity") + 
+  ggtitle("Yearly Observed Diversity by Plot") + 
+  theme_classic() + 
+  theme(
+    text = element_text(family = "serif")
+  )
+
+ggplot(data = alphaStat[!is.na(alphaStat$Block),], aes(x = Location, y = observed, fill = Year)) + geom_boxplot() + 
+  ylab("Observed Diversity") + 
+  ggtitle("ASV Diversity in Rhizosphere by Location-Year") + 
+  scale_fill_discrete(type = c("peachpuff3","steelblue3")) + 
+  theme_classic()
+
+ggplot(data = balphaStat, aes(x = Location, y = observed, fill = Year)) + geom_boxplot() + 
+  ylab("Observed Diversity") + 
+  ggtitle("ASV Diversity in Bulk Soil by Location-Year") + 
+  scale_fill_discrete(type = c("lightsalmon2","mediumpurple2")) + 
+  theme_classic()
+
+
+```
+
+```{r Relative Abundance}
+table(tax_table(psField)[, "Phylum"], exclude = NULL)
+ps1 <- subset_taxa(psField, !is.na(Kingdom) & !Kingdom %in% "k__Archaea")
+ps1 <- subset_taxa(ps1, !is.na(Phylum) & !Phylum %in% c("", "uncharacterized", "p__FBP", "p__Fibrobacteres", "p__Cyanobacteria", "Chlorophyta_ph"))
+ps1
+#saveRDS(ps1, "ps1.RDS")
+#ps1 = readRDS("ps1.RDS")
+
+
+pst <- ps1 %>%
+ tax_glom(taxrank = "Phylum") %>% # agglomerate at phylum level
+ transform_sample_counts(function(x) {x/sum(x)} ) # Transform to rel. abundance
+
+psf <- pst %>% psmelt() %>% # Melt to long format
+ #filter(Abundance > 0.02) %>% # Filter out low abundance taxa
+ arrange(Phylum) # Sort data frame alphabetically by phylum
+
+psf = psf[,c("Sample","Abundance","Phylum")]
+psf$Year = substr(psf$Sample,1,4)
+psf$Location = substr(psf$Sample, 6,7)
+psf$Sample = substr(x = psf$Sample, 9, length(psf$Sample))
+#saveRDS(psf,"psf.RDS")
+
+bulk = psf %>%
+  filter(grepl("B", Sample))
+```
+
+```{r Relative Abundance Plotting, fig.width=8,fig.height=7}
+# Calculate mean abundance across locations! Why did I do that...
+psm_summarized <- ddply(psf, c("Sample","Phylum"), summarise, N = length(Abundance), mean = mean(Abundance))
+#saveRDS(psm_summarized, "psm_summarized.RDS")
+View(psm_summarized)
+
+# Set colors for plotting
+phylum_colors <- c(
+ "#CBD588", "#5F7FC7", "orange","#DA5724", "#508578", "#CD9BCD",
+ "#AD6F3B", "#673770","#D14285", "#652926", "#C84248", 
+ "#8569D5", "#5E738F","#D1A33D", "#8A7C64", "#599861"
+)
+
+myColors = c("Acidobacteriota" = "#CBD588", "Actinobacteriota" = "#5F7FC7", "Bacteroidota" = "orange", "Chloroflexi" = "#508578", "Firmicutes" = "#DA5724", "Gemmatimonadota" = "#CD9BCD", "Myxococcota" = "#AD6F3B", "Planctomycetota" = "#673770", "Proteobacteria" = "#D14285", "Verrucomicrobiota" = "#652926")
+
+myPhyla = c("Verrucomicrobiota","Myxococcota","Planctomycetota","Gemmatimonadota","Firmicutes","Acidobacteriota","Bacteroidota", "Chloroflexi", "Proteobacteria", "Actinobacteriota")
+
+cc = scale_colour_manual(name = myPhyla, values = myColors)
+
+psf.rhiz = filter(psf, !grepl("B",Sample))
+psf.bulk = filter(psf, grepl("B",Sample))
+########################
+# Plot Relative Abundance of Everything other than the Checks
+########################
+ggplot(psf.rhiz, aes(x = Sample, y = Abundance, fill = factor(Phylum, levels = myPhyla))) + facet_grid(Year ~ Location,scales = "free") +
+  geom_bar(stat = "identity", width = 1) +
+  ggtitle("Relative Abundance of Microbial Phyla in Barley Rhizosphere") +
+  xlab("Barley Variety") + ylab("Relative Abundance") + 
+  scale_y_continuous(breaks = c(0.25,0.5,0.75,1),expand = c(0,0,0,0.0)) +
+  scale_fill_manual(values = myColors, name = "Phylum") +
+  theme_classic() + 
+    theme(
+      text = element_text(size = 16, family = "serif"),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.line.y = element_blank(),
+      plot.title = element_text(hjust = 0, size = 18),
+      legend.title = element_text(hjust = 0.5, size = 16)
+      ) 
+
+ggplot(psf.bulk, aes(x = Sample, y = Abundance, fill = factor(Phylum, levels = myPhyla))) + facet_grid(Year ~ Location,scales = "free") +
+  geom_bar(stat = "identity", width = 1) +
+  ggtitle("Relative Abundance of Microbial Phyla in Bulk Soil") +
+  xlab("Barley Variety") + ylab("Relative Abundance") + 
+  scale_y_continuous(breaks = c(0.25,0.5,0.75,1),expand = c(0,0,0,0.0)) +
+  scale_fill_manual(values = myColors, name = "Phylum") +
+  theme_classic() + 
+    theme(
+      text = element_text(size = 16, family = "serif"),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.line.y = element_blank(),
+      plot.title = element_text(hjust = 0, size = 18),
+      legend.title = element_text(hjust = 0.5, size = 16)
+      ) 
+
+
+#############################
+# Reorganizing plot for paper
+#############################
+View(psf)
+psf.rhiz = filter(psf, !grepl("B",Sample))
+x = psf.rhiz[psf.rhiz$Location == "BZ"& psf.rhiz$Year == "2021",]
+x = na.omit(x)
+
+g0 = ggplot(psf.rhiz[psf.rhiz$Location == "BZ"& psf.rhiz$Year == "2021",], aes(x = Sample, y = Abundance,fill = factor(Phylum, levels = myPhyla))) + geom_bar(stat = "identity",width = 1) +
+    ggtitle("Bozeman 2021") +
+  xlab("") + ylab("") + 
+  scale_y_continuous(breaks = c(0.25,0.5,0.75,1),expand = c(0,0,0,0.0)) +
+  scale_fill_manual(values = myColors, name = "Phylum") +
+  theme_classic() + 
+    theme(
+      text = element_text(size = 16),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.line.y = element_blank(),
+      plot.title = element_text(hjust = 0, size = 16),
+      legend.title = element_text("Phylum")
+      ) 
+
+g1 = ggplot(psf.rhiz[psf.rhiz$Location == "BZ"& psf.rhiz$Year == "2021",], aes(x = Sample, y = Abundance,fill = factor(Phylum, levels = myPhyla))) + geom_bar(stat = "identity",width = 1) +
+    ggtitle("Bozeman 2021") +
+  xlab("") + ylab("") + 
+  scale_y_continuous(breaks = c(0.25,0.5,0.75,1),expand = c(0,0,0,0.0)) +
+  scale_fill_manual(values = myColors, name = "Phylum") +
+  theme_classic() + 
+    theme(
+      text = element_text(size = 14),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.line.y = element_blank(),
+      plot.title = element_text(hjust = 0, size = 16),
+      legend.position = "none"
+      ) 
+
+g2 = ggplot(psf.rhiz[psf.rhiz$Location == "BZ"& psf.rhiz$Year == "2022",], aes(x = Sample, y = Abundance,fill = factor(Phylum, levels = myPhyla))) + geom_bar(stat = "identity",width = 1) +
+    ggtitle("Bozeman 2022") +
+  xlab("") + ylab("") + 
+  scale_y_continuous(breaks = c(0.25,0.5,0.75,1),expand = c(0,0,0,0.0)) +
+  scale_fill_manual(values = myColors, name = "Phylum") +
+  theme_classic() + 
+    theme(
+      text = element_text(size = 14),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.line.y = element_blank(),
+      plot.title = element_text(hjust = 0, size = 16),
+      legend.position = "none"
+      ) 
+
+g3 = ggplot(psf.rhiz[psf.rhiz$Location == "SD"& psf.rhiz$Year == "2021",], aes(x = Sample, y = Abundance,fill = factor(Phylum, levels = myPhyla))) + geom_bar(stat = "identity",width = 1) +
+    ggtitle("South Dakota 2021") +
+  xlab("") + ylab("") + 
+  scale_y_continuous(breaks = c(0.25,0.5,0.75,1),expand = c(0,0,0,0.0)) +
+  scale_fill_manual(values = myColors, name = "Phylum") +
+  theme_classic() + 
+    theme(
+      text = element_text(size = 14),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.line.y = element_blank(),
+      plot.title = element_text(hjust = 0, size = 16),
+      legend.position = "none"
+      ) 
+
+g4 = ggplot(psf.rhiz[psf.rhiz$Location == "SD"& psf.rhiz$Year == "2022",], aes(x = Sample, y = Abundance,fill = factor(Phylum, levels = myPhyla))) + geom_bar(stat = "identity",width = 1) +
+    ggtitle("South Dakota 2022") +
+  xlab("") + ylab("") + 
+  scale_y_continuous(breaks = c(0.25,0.5,0.75,1),expand = c(0,0,0,0.0)) +
+  scale_fill_manual(values = myColors, name = "Phylum") +
+  theme_classic() + 
+    theme(
+      text = element_text(size = 14),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.line.y = element_blank(),
+      plot.title = element_text(hjust = 0, size = 16),
+      legend.position = "none"
+      ) 
+
+g5 = ggplot(psf.rhiz[psf.rhiz$Location == "MO"& psf.rhiz$Year == "2021",], aes(x = Sample, y = Abundance,fill = factor(Phylum, levels = myPhyla))) + geom_bar(stat = "identity",width = 1) +
+    ggtitle("CARC 2021") +
+  xlab("") + ylab("") + 
+  scale_y_continuous(breaks = c(0.25,0.5,0.75,1),expand = c(0,0,0,0.0)) +
+  scale_fill_manual(values = myColors, name = "Phylum") +
+  theme_classic() + 
+    theme(
+      text = element_text(size = 14),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.line.y = element_blank(),
+      plot.title = element_text(hjust = 0, size = 16),
+      legend.position = "none"
+      )
+
+g6 = ggplot(psf.rhiz[psf.rhiz$Location == "MO"& psf.rhiz$Year == "2022",], aes(x = Sample, y = Abundance,fill = factor(Phylum, levels = myPhyla))) + geom_bar(stat = "identity",width = 1) +
+    ggtitle("CARC 2022") +
+  xlab("") + ylab("") + 
+  scale_y_continuous(breaks = c(0.25,0.5,0.75,1),expand = c(0,0,0,0.0)) +
+  scale_fill_manual(values = myColors, name = "Phylum") +
+  theme_classic() + 
+    theme(
+      text = element_text(size = 14),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.line.y = element_blank(),
+      plot.title = element_text(hjust = 0, size = 16),
+      legend.position = "none"
+      )
+
+g7 = ggplot(psf.rhiz[psf.rhiz$Location == "HI"& psf.rhiz$Year == "2021",], aes(x = Sample, y = Abundance,fill = factor(Phylum, levels = myPhyla))) + geom_bar(stat = "identity",width = 1) +
+    ggtitle("Hawaii 2021") +
+  xlab("") + ylab("") + 
+  scale_y_continuous(breaks = c(0.25,0.5,0.75,1),expand = c(0,0,0,0.0)) +
+  scale_fill_manual(values = myColors, name = "Phylum") +
+  theme_classic() + 
+    theme(
+      text = element_text(size = 14),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.line.y = element_blank(),
+      plot.title = element_text(hjust = 0, size = 16),
+      legend.position = "none"
+      )
+
+g0
+grid.arrange(g1,g5,g3,g2,g6,g4,g7) # Exported to powerpoint to make it look good.
+```
+
+```{r Bulk Relative Abundance Plots}
+#########################
+# Bulk Relative Abundances
+##########################
+x = psf.bulk[psf.bulk$Location == "BZ"& psf.bulk$Year == "2021",]
+b1 = ggplot(psf.bulk[psf.bulk$Location == "BZ"& psf.bulk$Year == "2021",], aes(x = Sample, y = Abundance,fill = factor(Phylum, levels = myPhyla))) + geom_bar(stat = "identity",width = 1) +
+    ggtitle("Bozeman 2021") +
+  xlab("") + ylab("") + 
+  scale_y_continuous(breaks = c(0.25,0.5,0.75,1),expand = c(0,0,0,0.0)) +
+  scale_fill_manual(values = myColors, name = "Phylum") +
+  theme_classic() + 
+    theme(
+      text = element_text(size = 14),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.line.y = element_blank(),
+      plot.title = element_text(hjust = 0, size = 16),
+      legend.position = "none"
+      )
+
+b2 = ggplot(psf.bulk[psf.bulk$Location == "BZ"& psf.bulk$Year == "2022",], aes(x = Sample, y = Abundance,fill = factor(Phylum, levels = myPhyla))) + geom_bar(stat = "identity",width = 1) +
+    ggtitle("Bozeman 2022") +
+  xlab("") + ylab("") + 
+  scale_y_continuous(breaks = c(0.25,0.5,0.75,1),expand = c(0,0,0,0.0)) +
+  scale_fill_manual(values = myColors, name = "Phylum") +
+  theme_classic() + 
+    theme(
+      text = element_text(size = 14),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.line.y = element_blank(),
+      plot.title = element_text(hjust = 0, size = 16),
+      legend.position = "none"
+      )
+
+b4 = ggplot(psf.bulk[psf.bulk$Location == "MO"& psf.bulk$Year == "2022",], aes(x = Sample, y = Abundance,fill = factor(Phylum, levels = myPhyla))) + geom_bar(stat = "identity",width = 1) +
+    ggtitle("CARC 2022 Pooled") +
+  xlab("") + ylab("") + 
+  scale_y_continuous(breaks = c(0.25,0.5,0.75,1),expand = c(0,0,0,0.0)) +
+  scale_fill_manual(values = myColors, name = "Phylum") +
+  theme_classic() + 
+    theme(
+      text = element_text(size = 14),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.line.y = element_blank(),
+      plot.title = element_text(hjust = 0, size = 16),
+      legend.position = "none"
+      )
+
+b5 = ggplot(psf.bulk[psf.bulk$Location == "SD"& psf.bulk$Year == "2021",], aes(x = Sample, y = Abundance,fill = factor(Phylum, levels = myPhyla))) + geom_bar(stat = "identity",width = 1) +
+    ggtitle("South Dakota 2021") +
+  xlab("") + ylab("") + 
+  scale_y_continuous(breaks = c(0.25,0.5,0.75,1),expand = c(0,0,0,0.0)) +
+  scale_fill_manual(values = myColors, name = "Phylum") +
+  theme_classic() + 
+    theme(
+      text = element_text(size = 14),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.line.y = element_blank(),
+      plot.title = element_text(hjust = 0, size = 16),
+      legend.position = "none"
+      )
+
+b6 = ggplot(psf.bulk[psf.bulk$Location == "SD"& psf.bulk$Year == "2022",], aes(x = Sample, y = Abundance,fill = factor(Phylum, levels = myPhyla))) + geom_bar(stat = "identity",width = 1) +
+    ggtitle("South Dakota 2022") +
+  xlab("") + ylab("") + 
+  scale_y_continuous(breaks = c(0.25,0.5,0.75,1),expand = c(0,0,0,0.0)) +
+  scale_fill_manual(values = myColors, name = "Phylum") +
+  theme_classic() + 
+    theme(
+      text = element_text(size = 14),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.line.y = element_blank(),
+      plot.title = element_text(hjust = 0, size = 16),
+      legend.position = "none"
+      )
+
+grid.arrange(b1,b2,b4,b5,b6)
+```
+
+This can replace all the above "plotting relative abundance chunks." 
+```{r Relative Abundance Plotting with MicroEco}
+
+me.psField = phyloseq2meco(psField)
+me.psField$sample_table = subset(me.psField$sample_table, Line != "Bulk")
+
+relAbun <- trans_abund$new(dataset = me.psField, taxrank = "Phylum", ntaxa = 8)
+relAbun$data_abund$Location = factor(relAbun$data_abund$Location, levels = c("BZ","MO","SD","HI"))
+
+relAbun$plot_bar(others_color = "grey70", facet = c("Location","Year"), xtext_keep = FALSE, legend_text_italic = FALSE, barwidth = 1)
+
+
+```
+
+
+
+## CHAPTER 2: ORDINATION
+
+First I calculated weighted unifrac across all location-years. Next I calculated weighted unifrac for only the mainland locations (BZ,MO,SD). 
+
+To calculate the effects of factors, I ran a permanova on the weighted unifrac distance matrix. The original, using ordinate() contains positive and negative values, which doesn't work with permanovas. Therefore I re-ran the weighted unifrac with UniFrac() and "normalized" = TRUE. 
+```{r Ordination, fig.height=5,fig.width=6}
+rhizo.ps = subset_samples(ps1, Line != "Bulk")
+
+
+## RDA Updated Way ------------
+#uni = UniFrac(rhizo.ps, weighted = TRUE, normalized = TRUE, fast = TRUE) # Same as ordinate, but I'm normalizing for permanova
+#saveRDS(uni, "wunifrac.RDS")
+uni = readRDS("C:/Users/killi/OneDrive - Montana State University/Documents/Projects/Field_Combined/wunifrac.RDS")
+
+sample = as.data.frame(as.matrix(sample_data(rhizo.ps)))
+sample$locyr = paste(sample$Location, sample$Year, sep = "_")
+
+# Model by Location and Year *This is the one*
+r2 = capscale(uni ~ Location : Year, data = sample)
+p2 = gg_ordiplot(r2, groups = sample$Location)
+p2$plot + scale_color_manual(name = "Location",
+                     labels = c("swMT","HI","cntrMT","SD"),
+                     values = c("skyblue","goldenrod1","darkorange","seagreen3")) + theme_classic()
+summary(r2)
+anova(r2)
+screeplot(r2)
+anova(r2, by = "term")
+
+# Model includes Year, Location, and interaction
+r3 = capscale(uni ~ Location + Year + Location:Year, data = sample)
+p2 = gg_ordiplot(r2, groups = sample$Location)
+
+anova(r3, by = "term")
+
+
+# Model only by location
+r = capscale(uni ~ Location,data = sample) # response is wunifrac distance matrix
+p = gg_ordiplot(r, groups = sample$Location)
+p$plot +
+  scale_color_manual(name = "Location",
+                     labels = c("swMT","HI","cntrMT","SD"),
+                     values = c("skyblue","goldenrod1","darkorange","seagreen3")) + 
+  theme_classic()
+
+summary(r)
+# Model by location with year as a condition (random variable)
+## This means abundances are normalized across year before modeling by location. 
+r1 = capscale(uni ~ Location + Condition(Year:Location), data = sample)
+p1 = gg_ordiplot(r1, groups = sample$Location)
+p1$plot + theme_classic()
+summary(r1)
+anova(r1)
+screeplot(r1)
+
+
+
+# Model by Location and Year 
+r3 = capscale(uni ~ Location + Year, data = sample)
+p3 = gg_ordiplot(r2, groups = sample$Location)
+p3$plot + theme_classic()
+summary(r3)
+anova(r3)
+screeplot(r3)
+anova(r3, by = "onedf")
+
+
+# All data --------
+N.ord = ordinate(ps1, "PCoA", "wunifrac")
+
+#saveRDS(N.ord, "wuPCoA.RDS")
+N1.ord = readRDS("wuPCoA.RDS")
+
+
+
+sample_data(ps1)$Location <- factor(sample_data(ps1)$Location, levels = c("BZ", "MO", "SD", "HI"))
+plot_ordination(ps1, N1.ord,type = "sites", color = "Location", shape = "Year", title = "Weighted Unifrac by Location by Year") +
+  scale_color_manual(name = "Location",
+                     labels = c("swMT","cntrMT","SD","HI"),
+                     values = c("skyblue","darkorange","seagreen3","goldenrod1")) +
+  theme_classic()
+
+x = data.frame(sample_data(ps1))
+
+
+
+# RDA Old Way -------------
+RDA.ord = ordinate(rhizo.ps, "RDA") # Doesn't account for taxonomic relatedness
+#saveRDS(RDA.ord, "wuRDA.RDS")
+RDA.ord = readRDS("wuRDA.RDS")
+
+plot_ordination(rhizo.ps, RDA.ord,axes = c(1,2), type = "sites", color = "Location", shape = "Year", title = "Weighted Unifrac RDA by Location by Year") +
+  scale_color_manual(name = "Location",
+                     labels = c("swMT","cntrMT","SD","HI"),
+                     values = c("skyblue","darkorange","seagreen3","goldenrod1")) + theme_classic()
+
+# No Hawaii Rhizosphere -------
+rhizosansHI.ps = subset_samples(rhizo.ps, Location != "HI")
+uni.sansHI = UniFrac(rhizosansHI.ps, weighted = TRUE, normalized = TRUE, fast = TRUE) # Same as ordinate, but I'm normalizing for permanova
+#saveRDS(uni, "wunifrac.RDS")
+
+# Rhizosphere only --------------
+R.ord = ordinate(rhizo.ps,"PCoA","wunifrac")
+x = ordinate(rhizo.ps, "PCoA", "euclidean") # look similar to RDA?
+R.ord = readRDS("rhizoOrd.RDS")
+sample_data(rhizo.ps)$Location <- factor(sample_data(rhizo.ps)$Location, levels = c("BZ", "MO", "SD", "HI"))
+plot_ordination(rhizo.ps,R.ord,type = "sites", color = "Location", shape = "Year", title = "Rhizosphere Weighted Unifrac by Location Year") +
+  scale_color_manual(values = c("skyblue","darkorange","seagreen3","goldenrod1")) + 
+  theme_classic()
+
+plot_ordination(rhizo.ps, x, type = "sites", color = "Location", title = "PCoA Euclidean Dist") +
+  scale_color_manual(values = c("skyblue","darkorange","seagreen3","goldenrod1")) + 
+  theme_classic()
+
+
+
+# Ordination Stats
+
+metadata = as(sample_data(rhizo.ps), "data.frame")
+metadata$locyr = paste(metadata$Location, metadata$Year,sep = "")
+
+N = N.ord
+N$vectors = N$vectors
+x = adonis2(uni ~ locyr + Line ,metadata[!is.na(metadata$Line),], permutations = 100) # Method is ignored since I entered a dissimilarity matrix
+
+
+
+# Bulk Only ------------
+psBulk = subset_samples(psField, Line == "Bulk")
+#saveRDS(psBulk,"psBulk.RDS")
+
+B.ord = ordinate(psBulk,"PCoA","wunifrac")
+plot_ordination(psBulk, B.ord,type = "sites", color = "Location", shape = "Year", title = "Bulk Sample Weighted Unifrac PCoA") +
+  scale_color_manual(values = c("skyblue","darkorange","seagreen3")) +
+  theme_classic()
+
+```
+
+## CHAPTER 3: RANDOM FOREST
+
+**Use in GWAS paper Figure 1**
+```{r Random Forest without Hawaii across all locations, fig.width=12,fig.height=5}
+# Create microEco object from ps1
+meF = phyloseq2meco(ps1)
+meF$sample_table = subset(meF$sample_table, Line != "Bulk")
+meF$sample_table = subset(meF$sample_table, Location != "HI")
+meFg = meF$merge_taxa(taxa = "Genus")
+meFg$cal_abund()
+## Prep microeco dataframe for random forest if needed
+# meFg$tax_table$Genus = ifelse(nchar(meFg$tax_table$Genus)>0,yes = meFg$tax_table$Genus,no = "NA") # make blanks = NA
+# meFg$tax_table = subset(meFg$tax_table, Genus != "NA")
+# meFg$tax_table$Genus[meFg$tax_table$Genus == "Allorhizobium-Neorhizobium-Pararhizobium-Rhizobium"] = "Allo-Neo-Para-Rhizobium"
+
+t1 <- trans_diff$new(dataset = meFg, method = "rf", group = "Location", taxa_level = "Genus", )
+
+p.2.2 = t1$plot_diff_bar(use_number = 1:20, width = 0.8,keep_prefix = FALSE, 
+                  group_order = c("BZ","MO", "SD")) +
+    scale_fill_manual(name = "Location", 
+     labels = c("swMT","cntrMT","SD"),
+     values = c("skyblue","darkorange","seagreen3")) +
+  scale_color_manual(name = "Location",
+     labels = c("swMT","cntrMT","SD"),
+     values = c("skyblue","darkorange","seagreen3"))
+
+p.2.1 = t1$plot_diff_abund(add_sig = F, select_taxa = t1$plot_diff_bar_taxa, keep_prefix = FALSE) + ggplot2::ylab("Relative abundance (%)") +
+    scale_fill_manual(name = "Location", 
+     labels = c("SD","cntrMT","swMT"),
+     values = c("seagreen3","darkorange","skyblue")) +
+  scale_color_manual(name = "Location",
+     labels = c("SD","cntrMT","swMT"),
+     values = c("seagreen3","darkorange","skyblue"))
+
+grid.arrange(p.2.2 + theme(legend.position = "none"),p.2.1, nrow = 1)
+```
+
+```{r Random Forest by Function, fig.width=12,fig.height=5}
+####
+# RF Across all FAPROTAX functions
+####
+meF = phyloseq2meco(ps1)
+meF$sample_table = subset(meF$sample_table, Line != "Bulk")
+meF$sample_table = subset(meF$sample_table, Location != "HI")
+meFg = meF$merge_taxa(taxa = "Genus")
+# meFg$tax_table$Genus = ifelse(nchar(meFg$tax_table$Genus)>0,yes = meFg$tax_table$Genus,no = "NA") # make blanks = NA
+# meFg$tax_table = subset(meFg$tax_table, Genus != "NA")
+# meFg$tax_table$Genus[meFg$tax_table$Genus == "Allorhizobium-Neorhizobium-Pararhizobium-Rhizobium"] = "Allo-Neo-Para-Rhizobium"
+meFg$cal_abund()
+meFg$sample_table$LocYear = paste(meFg$sample_table$Year, meFg$sample_table$Location, sep = "_")
+
+
+
+
+func = trans_func$new(meFg)
+func$cal_spe_func(prok_database = "FAPROTAX") # Run function assignment
+
+# calculate the percentages for communities
+# here consider the abundance
+func$cal_spe_func_perc(abundance_weighted = TRUE)
+func$trans_spe_func_perc()
+
+meFg2 = clone(meFg)
+# transpose res_spe_func_perc to be a data.frame like taxonomic abundance
+tmp <- as.data.frame(t(func$res_spe_func_perc), check.names = FALSE)
+# assign the table back to taxa_abund list for further analysis
+meFg2$taxa_abund$func <- tmp
+meFg2$sample_table$LocYear = paste(meFg2$sample_table$Year,meFg2$sample_table$Location, sep = "_")
+
+# select the "func" in taxa_abund list in trans_diff
+t2 <- trans_diff$new(dataset = meFg2, method = "rf", group = "Location", taxa_level = "func", importance = TRUE, boots = 30, filter_thres = 1)
+
+p1 = t2$plot_diff_bar(width = 0.8, 
+                  group_order = c("BZ","MO", "SD")) +
+  scale_fill_manual(name = "Location", 
+     labels = c("swMT","cntrMT","SD"),
+     values = c("skyblue","darkorange","seagreen3")) +
+  scale_color_manual(name = "Location",
+     labels = c("swMT","cntrMT","SD"),
+     values = c("skyblue","darkorange","seagreen3")) + 
+  theme(legend.position = "none", axis.text.y = element_text(angle = 45, size = 9))
+  
+p2 = t2$plot_diff_abund(add_sig = F, select_taxa = t2$plot_diff_bar_taxa) + ggplot2::ylab("Relative abundance (%)") +
+  scale_fill_manual(name = "Location", 
+     labels = c("SD","cntrMT","swMT"),
+     values = c("seagreen3","darkorange","skyblue")) +
+  scale_color_manual(name = "Location",
+     labels = c("SD","cntrMT","swMT"),
+     values = c("seagreen3","darkorange","skyblue"))+theme(axis.text.y = element_blank())
+
+p1 | p2
+
+
+grid.arrange(p.2.4 + theme(legend.position = "none"), p.2.3,nrow = 1)
+
+```
+
+### Random Forest Rabbit Hole
+The microEco package is great for running a simple random forest, but there isn't any control for how the random forest is run, or the outputs. Here I'm trying the randomForest package, which is where microeco gets it's functions anyway.
+
+```{r message=FALSE}
+library(randomForest)
+
+ps = tax_glom(ps1, taxrank = "Phylum", NArm = TRUE)
+ps = tax_glom(ps1, taxrank = "Genus", NArm = TRUE)
+pred = otu_table(ps)
+response = as.factor(paste(sample_data(ps)$Location, sample_data(ps)$Year, sep = ""))
+data = data.frame(response, pred)
+
+# Running Random Forest here. 
+## Number of trees is dependent on samples so I'll run it at various depths to see how it affects the model. 
+library(randomForest)
+x = randomForest(response ~., data = data, ntree = 10000, importance = TRUE)
+x
+
+
+
+
+
+imp = importance(x)
+imp = data.frame(pred = rownames(imp),imp)
+imp$pred = as.factor(imp$pred)
+imp = arrange(imp, desc(MeanDecreaseGini))
+imp.20 = imp[1:20,]
+
+ggplot(imp.20, aes(x = reorder(pred,MeanDecreaseGini), y = MeanDecreaseGini)) +
+  geom_bar(stat = "identity", fill = "steelblue4") + coord_flip()
+```
+
+
+## CAHPTER 4: CORE MICROBIOME ANALYSIS
+```{r CORE MICROBIOME - Abundance / Occupancy}
+library(vegan)
+View(sample_data(psField))
+
+pss = tax_glom(psField, taxrank = "Genus", NArm = FALSE) # Read in from setup chunk
+
+tax = as.data.frame(tax_table(pss))
+otu = otu_table(pss)
+otu = t(otu)
+otu = as.data.frame(otu)
+
+###
+# Rarefying data
+###
+rarecurve(t(otu),step = 100, label = FALSE)
+
+# Remove any samples that has read depth < 10,000
+otu10k = rowSums(t(otu)) >= 10000 
+fdata = t(otu)
+fdata = as.data.frame(fdata)
+
+fdata = fdata[otu10k,]
+fdata = as.data.frame(fdata)
+
+otu_rare <- rrarefy(fdata, sample = 10000) # Rarefies to 10k 
+rowSums(otu_rare)
+otu_rare <- otu_rare[rowSums(otu_rare)>0,]
+otu_rare = t(otu_rare)
+otu_rare = as.data.frame(otu_rare)
+
+#create otu_rare of 2021 and 2022 independently
+otu21 <- otu_rare[,grep("2021",colnames(otu_rare))] 
+otu22 <- otu_rare[,grep("2022",colnames(otu_rare))] 
+
+
+
+
+```
+### sdfsdf
+```{r unique to location}
+sd <- as.data.frame(sample_data(psField)) # Plot and SampleID are both incomplete but combine for a full Plot column. 
+#sd[is.na(sd$SampleID),"SampleID"] = sd[is.na(sd$SampleID),"Plot"]
+sd$SampleID = row.names(sd)
+
+carc_otu <- otu_rare[,grep("MO",colnames(otu_rare))] 
+bz_otu <- otu_rare[,grep("BZ",colnames(otu_rare))] 
+hi_otu <- otu_rare[,grep("HI",colnames(otu_rare))] 
+sd_otu <- otu_rare[,grep("SD",colnames(otu_rare))] 
+
+# selected_cols <- grep("BZ|MO", names(otu_rare), value = TRUE)
+# mt_otu <- otu_rare[,selected_cols]
+
+
+#select location unique OTUs
+carc_otu <- carc_otu[rowSums(carc_otu)>0,]
+bz_otu <- bz_otu[rowSums(bz_otu)>0,]
+hi_otu <- hi_otu[rowSums(hi_otu)>0,]
+sd_otu <- sd_otu[rowSums(sd_otu)>0,]
+
+
+carc_uniq <- carc_otu[!(rownames(carc_otu) %in% rownames(bz_otu)) & !(rownames(carc_otu) %in% rownames(sd_otu)) & !(rownames(carc_otu) %in% rownames(hi_otu)),]
+bz_uniq <- bz_otu[!(rownames(bz_otu) %in% rownames(sd_otu)) & !(rownames(bz_otu) %in% rownames(carc_otu)) & !(rownames(bz_otu) %in% rownames(sd_otu)),]
+hi_uniq <- hi_otu[!(rownames(hi_otu) %in% rownames(bz_otu)) & !(rownames(hi_otu) %in% rownames(sd_otu)) & !(rownames(hi_otu) %in% rownames(carc_otu)),]
+sd_uniq <- sd_otu[!(rownames(sd_otu) %in% rownames(carc_otu)) & !(rownames(sd_otu) %in% rownames(bz_otu)) & !(rownames(sd_otu) %in% rownames(hi_otu)),]
+
+
+otu_PA <- 1*((otu_rare>0)==1)
+otu_PA <- otu_PA[rowSums(otu_PA)>0,]
+Occ <- rowSums(otu_PA)/ncol(otu_PA)
+
+#Pick which com_abund to use here
+#com_abund <- rowSums(otu_rare)/ncol(otu_rare)
+abund <- decostand(otu_rare, method='total', MARGIN=2)
+com_abund <- rowSums(abund)/ncol(abund)
+
+df_occ <- data.frame(otu=names(Occ), occ=Occ) 
+df_abun <- data.frame(otu=names(com_abund), abun=log10(com_abund))
+occ_abun <- left_join(df_occ, df_abun) 
+
+occ_abun$found <- 'Shared'
+occ_abun$found[occ_abun$otu %in% rownames(carc_uniq)] <- 'Moccasin, MT'
+occ_abun$found[occ_abun$otu %in% rownames(bz_uniq)] <- 'Bozeman, MT'
+occ_abun$found[occ_abun$otu %in% rownames(hi_uniq)] <- 'Hawaii'
+occ_abun$found[occ_abun$otu %in% rownames(sd_uniq)] <- 'South Dakota'
+
+
+
+# Add row names as a new column of OTU names
+lastValue <- function(x) tail(x[!is.na(x)], 1)
+last_taxons<- apply(tax, 1, lastValue)
+tax$last_taxon <- last_taxons
+tax$otu <- rownames(tax)
+tax$final_names <- paste(tax$otu, tax$last_taxon, sep='-')
+```
+
+```{r Tax distribution}
+# Taxonomic Distribution
+otu.rel.abun <- decostand(otu_rare, method="total", MARGIN=2) #calculating relative abundance
+top.otus = as.data.frame(head(sort(rowSums(otu.rel.abun), decreasing = T),10))
+abund.top.otus <- otu.rel.abun[rownames(otu.rel.abun) %in% rownames(top.otus),]
+
+size_occ<- data.frame(otu=as.factor(rownames(otu_rare)),otu_rare) %>%
+  gather(SampleID, abun, -otu) %>%
+  left_join(sd[,c('SampleID', 'Location')], by='SampleID') %>%
+  left_join(tax, by='otu') %>%
+  group_by(otu, Location, Family, Genus, final_names) %>%
+  mutate(sum_abun=sum(abun),
+         n_rep=length(abun),
+         rel_occ=sum_abun/n_rep,
+         is_present=1*((sum_abun>0)==1))
+
+#calculating presence across sites
+tmp_occ <- size_occ %>%
+  group_by(otu, Location) %>%
+  dplyr::summarize(n=sum(is_present),
+                   presence= 1*((n>0)==1)) %>%
+  group_by(otu) %>%
+  dplyr::summarize(
+    total_presence=sum(presence)
+  )
+
+combined_occ_data <- left_join(tmp_occ, occ_abun)
+
+combined_occ_data%>%
+  filter(total_presence==1) %>%
+  group_by(total_presence,found) %>%
+  summarise(counts=length(otu)) %>%
+  mutate(tot_counts=sum(counts),
+         rel_contribution=counts/tot_counts)
+```
+
+```{r Neutral Model}
+##*********************************
+#Sloan neutral model 
+spp=t(otu_rare)
+spp = as.data.frame(spp)
+taxon=as.vector(size_occ$last_taxon)
+
+# Models for the whole community
+# Load sncm.fit.R 
+# The following will fail if rarefaction isn't done - low abundance samples must be removed.
+library(minpack.lm)
+library(Hmisc)
+obs.np=sncm.fit(spp, taxon=F, stats=FALSE, pool=NULL) # All data is there except the "y" column which is all NAs
+sta.np=sncm.fit(spp, taxon, stats=TRUE, pool=NULL)
+sta.np.16S <- sta.np
+
+above.pred=sum(obs.np$freq > (obs.np$pred.upr), na.rm=TRUE)/sta.np$Richness
+below.pred=sum(obs.np$freq < (obs.np$pred.lwr), na.rm=TRUE)/sta.np$Richness
+
+ap = obs.np$freq > (obs.np$pred.upr)
+bp = obs.np$freq < (obs.np$pred.lwr)
+
+Predict <- obs.np
+Predict$otu <- rownames(Predict)
+UpPredictOTU <- unique(Predict$otu[ap==TRUE])
+DownPedictedOTU <- unique(Predict$otu[bp==TRUE])
+
+# Save data frames for making combined plots later
+#saveRDS(combined_occ_data, "combined_occ_data_16S.RDS")
+#saveRDS(obs.np, "obs.np.16S.RDS")
+#saveRDS(sta.np.16S, "sta.np.16S.RDS")
+```
+
+```{r FIGURE}
+########
+# Fig 
+ggplot(data = combined_occ_data, aes(x=abun,y=occ)) + 
+  geom_line(color='black', data=obs.np, size=2, aes(y=obs.np$freq.pred, x=log10(obs.np$p))) +
+  geom_line(color='black', lty='twodash', size=1, data=obs.np, aes(y=obs.np$pred.upr, x=log10(obs.np$p)))+
+  geom_line(color='black', lty='twodash', size=1, data=obs.np, aes(y=obs.np$pred.lwr, x=log10(obs.np$p)))+
+  geom_point(data = combined_occ_data[combined_occ_data$found == "Shared",], aes(color = "Shared")) +
+  geom_point(data = combined_occ_data[combined_occ_data$found == "Bozeman, MT",],aes(color = "Bozeman")) +
+  geom_point(data = combined_occ_data[combined_occ_data$found == "Moccasin, MT",],aes(color = "Moccasin, MT")) + 
+  geom_point(data = combined_occ_data[combined_occ_data$found == "South Dakota",],aes(color = "South Dakota")) +
+  geom_point(data = combined_occ_data[combined_occ_data$found == "Hawaii",],aes(color = "Hawaii")) +
+  labs(x=paste("log10(mean abundance)\n (n=",sta.np.16S$Richness," OTUs)", sep=''), y=paste("Occupancy (n=",sta.np.16S$Samples," samples)",sep=''), color = "", title = "Abundance-Occupancy Relationship Amongst Genera in Bulk Samples") +
+  theme_classic(base_family = "serif") + 
+  theme(
+    legend.position = c(.2,.6),
+    legend.background = element_rect(fill = "seashell"),
+    plot.background = element_rect(fill = "seashell"),
+    panel.background = element_rect(fill = "seashell"),
+    plot.title = element_text(hjust = 0.5, size = 16)
+  )
+
+```
+
+```{r core community, fig.dim=c(12,12)}
+######################################################
+#Core community 
+length(Occ[Occ==1]) # 28 ASVs are in all samples (Occupancy = 1 = 100%)
+
+together_occ16S <- otu.rel.abun[rownames(otu.rel.abun) %in% occ_abun$otu[occ_abun$occ>=0.80],] # Should be ==1 
+
+occ_16S <- data.frame(otu=as.factor(rownames(together_occ16S)),together_occ16S) %>%
+  gather(SampleID, abun, -otu) %>%
+  left_join(sd[,c('SampleID','Location')], by='SampleID') %>%
+  left_join(tax, by='otu') %>%
+  group_by(Location, Phylum, Family, Genus, otu) %>%
+  mutate(
+    n=abun/length(abun))
+
+core_genera <- data.frame(data.frame(otu=as.factor(rownames(together_occ16S)),together_occ16S)) %>%
+  gather(SampleID, abun, -otu) %>%
+  left_join(sd[c('SampleID','Location')], by='SampleID') %>%
+  left_join(tax, by='otu') %>%
+  mutate(new_names = if_else((Family == "uncultured bacterium" | Family == "NA" | is.na(Order)), Order, Order),
+         new_names = if_else((new_names == 'uncultured Acidobacteria bacterium'), 'Acidobacteria bacterium', new_names)) %>%
+  arrange(desc(abun))
+
+core_genera <- subset(core_genera, new_names != "NA")
+unique(core_genera$new_names)
+
+x = tapply(core_genera$abun, core_genera$new_names, function(x) mean(x))
+x = sort(x, TRUE)
+core_genera$new_names = factor(as.character(core_genera$new_names), levels=names(x))
+
+#saveRDS(core_genera, "core_genera_16S.RDS")
+```
+
+```{r FIGURES, eval=FALSE}
+########
+# Fig 
+unique(core_genera$Phylum)
+
+phylum_colors <-  c('Actinobacteriota'='#3cb44b','Proteobacteria'='#e6194B','Bacteroidota'='#4363d8','Chloroflexi'='#f58231','Gemmatimonadota'='#bfef45','Planctomycetota'='#f032e6','Acidobacteriota'='#911eb4','Myxococcota'='#469990','Verrucomicrobiota'= '#e6beff','Nitrospirota'='#aaffc3')
+
+
+# This is categorized by Order, but can be organized by any taxon down to Genus level. 
+
+core_taxa <- ggplot(core_genera,aes(Genus, abun, fill=Phylum)) +
+  theme_bw()+
+  geom_boxplot() +
+  scale_fill_manual(values=phylum_colors)+
+  labs(y='Relative abundance', x='Genus') +
+  theme(panel.border = element_blank(), 
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        axis.line = element_line(colour = "black"),
+        legend.position = "right",
+        legend.title = element_text(size=12),
+        axis.text.y = element_text(size=12),
+        axis.text.x = element_text(angle = 90),
+        legend.text = element_text(size=10))+
+        theme(text = element_text(size = 14))
+core_taxa
+
+coreTaxaCounts <- core_genera %>%
+  group_by(Phylum,Genus) %>%
+  summarise(n_taxa=length(unique(otu))) %>%
+  ggplot(aes(x=Genus, n_taxa, fill=Phylum)) +
+  geom_bar(stat='identity') +
+  ylab('Number of taxa') +
+  xlab('') +
+  scale_fill_manual(values=phylum_colors)+
+  theme_bw()+
+  theme(axis.title.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank(),
+        legend.position = 'none',
+        panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))+
+  coord_flip() + theme(text = element_text(size = 14)) 
+coreTaxaCounts
+grid.arrange(core_taxa, coreTaxaCounts, widths=c(3.1,1))  
+
+
+ggplot(core_genera, aes(x = Genus)) + geom_bar()
+
+pdf("Figures/AO Family Core Taxa.pdf", width = 12, height = 8)
+grid.arrange(core_taxa, coreTaxaCounts, widths=c(2.5,.7)) 
+dev.off()
+```
+
+## CHAPTER 5: Rhizosphere Compared to Bulk
+```{r Abundance Occupancy}
+S2 = subset_samples(psField, Line != "Bulk" & Line != "Merit57" & Line != "Odyssey" & Line != "Lavina" & Line != "Hockett" & Line != "Merit 57")
+bulk = subset_samples(psField, Line == "Bulk")
+
+# Experimental lines prep
+pss.S2 = tax_glom(S2, taxrank = "Genus", NArm = FALSE) # Ran as pss through Core Microbiome
+
+tax = as.data.frame(tax_table(pss.S2))
+otu = otu_table(pss.S2)
+otu = t(otu)
+otu = as.data.frame(otu)
+
+
+rarecurve(t(otu),step = 100, label = FALSE)
+
+# Remove any samples that has read depth < 10,000
+otu10k = rowSums(t(otu)) >= 10000 
+fdata = t(otu)
+fdata = as.data.frame(fdata)
+
+fdata = fdata[otu10k,]
+fdata = as.data.frame(fdata)
+
+otu_rare <- rrarefy(fdata, sample = 10000) # Rarefies to 10k 
+rowSums(otu_rare)
+otu_rare <- otu_rare[rowSums(otu_rare)>0,]
+otu_rare = t(otu_rare)
+otu_rare = as.data.frame(otu_rare)
+
+otu_rare.S2 = otu_rare
+
+## Bulk prep
+pss.bulk = tax_glom(bulk, taxrank = "Genus", NArm = FALSE)
+
+tax = as.data.frame(tax_table(pss.bulk))
+otu = otu_table(pss.bulk)
+otu = t(otu)
+otu = as.data.frame(otu)
+
+rarecurve(t(otu),step = 100, label = FALSE)
+
+# Remove any samples that has read depth < 10,000
+otu10k = rowSums(t(otu)) >= 10000 
+fdata = t(otu)
+fdata = as.data.frame(fdata)
+
+fdata = fdata[otu10k,]
+fdata = as.data.frame(fdata)
+
+otu_rare <- rrarefy(fdata, sample = 10000) # Rarefies to 10k 
+rowSums(otu_rare)
+otu_rare <- otu_rare[rowSums(otu_rare)>0,]
+otu_rare = t(otu_rare)
+otu_rare = as.data.frame(otu_rare)
+
+otu_rare.bulk = otu_rare
+
+##### ABUNDANCE OCCUPANCY #####
+
+sd <- as.data.frame(sample_data(S2)) # Plot and SampleID are both incomplete but combine for a full Plot column. 
+sd$SampleID = row.names(sd)
+
+carc_otu <- otu_rare.S2[,grep("MO",colnames(otu_rare.S2))] 
+bz_otu <- otu_rare.S2[,grep("BZ",colnames(otu_rare.S2))]
+sd_otu <- otu_rare.S2[,grep("SD",colnames(otu_rare.S2))]
+
+View(otu)
+#select location unique OTUs
+carc_otu <- carc_otu[rowSums(carc_otu)>0,]
+bz_otu <- bz_otu[rowSums(bz_otu)>0,]
+sd_otu <- sd_otu[rowSums(sd_otu)>0,]
+
+carc_uniq <- carc_otu[!(rownames(carc_otu) %in% rownames(bz_otu)) & !(rownames(carc_otu) %in% rownames(sd_otu)),]
+bz_uniq <- bz_otu[!(rownames(bz_otu) %in% rownames(carc_otu)) & !(rownames(bz_otu) %in% rownames(sd_otu)),]
+sd_uniq <- sd_otu[!(rownames(sd_otu) %in% rownames(carc_otu)) & !(rownames(sd_otu) %in% rownames(bz_otu)),]
+
+otu_PA <- 1*((otu_rare.S2>0)==1)
+otu_PA <- otu_PA[rowSums(otu_PA)>0,]
+Occ <- rowSums(otu_PA)/ncol(otu_PA)
+
+#Pick which com_abund to use here
+#com_abund <- rowSums(otu_rare)/ncol(otu_rare)
+abund <- decostand(otu_rare.S2, method='total', MARGIN=2)
+com_abund <- rowSums(abund)/ncol(abund)
+
+df_occ <- data.frame(otu=names(Occ), occ=Occ) 
+df_abun <- data.frame(otu=names(com_abund), abun=log10(com_abund))
+occ_abun <- left_join(df_occ, df_abun) 
+
+occ_abun$found <- 'shared'
+occ_abun$found[occ_abun$otu %in% rownames(carc_uniq)] <- 'Moccasin, MT'
+occ_abun$found[occ_abun$otu %in% rownames(bz_uniq)] <- 'Bozeman, MT'
+occ_abun$found[occ_abun$otu %in% rownames(sd_uniq)] <- 'South Dakota'
+
+
+# Add row names as a new column of OTU names
+lastValue <- function(x) tail(x[!is.na(x)], 1)
+last_taxons<- apply(tax, 1, lastValue)
+tax$last_taxon <- last_taxons
+tax$otu <- rownames(tax)
+tax$final_names <- paste(tax$otu, tax$last_taxon, sep='-')
+
+##### Bulk #####
+sd <- as.data.frame(sample_data(bulk)) # Plot and SampleID are both incomplete but combine for a full Plot column. 
+sd$SampleID = row.names(sd)
+
+carc_otu <- otu_rare.bulk[,grep("MO",colnames(otu_rare.bulk))] 
+bz_otu <- otu_rare.bulk[,grep("BZ",colnames(otu_rare.bulk))]
+sd_otu <- otu_rare.bulk[,grep("SD",colnames(otu_rare.bulk))]
+
+View(otu)
+#select location unique OTUs
+carc_otu <- carc_otu[rowSums(carc_otu)>0,]
+bz_otu <- bz_otu[rowSums(bz_otu)>0,]
+sd_otu <- sd_otu[rowSums(sd_otu)>0,]
+
+carc_uniq <- carc_otu[!(rownames(carc_otu) %in% rownames(bz_otu)) & !(rownames(carc_otu) %in% rownames(sd_otu)),]
+bz_uniq <- bz_otu[!(rownames(bz_otu) %in% rownames(carc_otu)) & !(rownames(bz_otu) %in% rownames(sd_otu)),]
+sd_uniq <- sd_otu[!(rownames(sd_otu) %in% rownames(carc_otu)) & !(rownames(sd_otu) %in% rownames(bz_otu)),]
+
+otu_PA <- 1*((otu_rare.bulk>0)==1)
+otu_PA <- otu_PA[rowSums(otu_PA)>0,]
+Occ <- rowSums(otu_PA)/ncol(otu_PA)
+
+#Pick which com_abund to use here
+#com_abund <- rowSums(otu_rare)/ncol(otu_rare)
+abund <- decostand(otu_rare.bulk, method='total', MARGIN=2)
+com_abund <- rowSums(abund)/ncol(abund)
+
+df_occ <- data.frame(otu=names(Occ), occ=Occ) 
+df_abun <- data.frame(otu=names(com_abund), abun=log10(com_abund))
+occ_abun <- left_join(df_occ, df_abun) 
+
+occ_abun$found <- 'shared'
+occ_abun$found[occ_abun$otu %in% rownames(carc_uniq)] <- 'Moccasin, MT'
+occ_abun$found[occ_abun$otu %in% rownames(bz_uniq)] <- 'Bozeman, MT'
+occ_abun$found[occ_abun$otu %in% rownames(sd_uniq)] <- 'South Dakota'
+
+
+# Add row names as a new column of OTU names
+lastValue <- function(x) tail(x[!is.na(x)], 1)
+last_taxons<- apply(tax, 1, lastValue)
+tax$last_taxon <- last_taxons
+tax$otu <- rownames(tax)
+tax$final_names <- paste(tax$otu, tax$last_taxon, sep='-')
+
+
+```
+
+```{r}
+# Taxonomic Distribution
+otu.rel.abun <- decostand(otu_rare.bulk, method="total", MARGIN=2) #calculating relative abundance
+top.otus = as.data.frame(head(sort(rowSums(otu.rel.abun), decreasing = T),10))
+abund.top.otus <- otu.rel.abun[rownames(otu.rel.abun) %in% rownames(top.otus),]
+
+size_occ<- data.frame(otu=as.factor(rownames(otu_rare.bulk)),otu_rare.bulk) %>%
+  gather(SampleID, abun, -otu) %>%
+  left_join(sd[,c('SampleID', 'Location')], by='SampleID') %>%
+  left_join(tax, by='otu') %>%
+  group_by(otu, Location, Family, Genus, final_names) %>%
+  mutate(sum_abun=sum(abun),
+         n_rep=length(abun),
+         rel_occ=sum_abun/n_rep,
+         is_present=1*((sum_abun>0)==1))
+
+#calculating presence across sites
+tmp_occ <- size_occ %>%
+  group_by(otu, Location) %>%
+  dplyr::summarize(n=sum(is_present),
+                   presence= 1*((n>0)==1)) %>%
+  group_by(otu) %>%
+  dplyr::summarize(
+    total_presence=sum(presence)
+  )
+
+combined_occ_data <- left_join(tmp_occ, occ_abun)
+
+combined_occ_data%>%
+  filter(total_presence==1) %>%
+  group_by(total_presence,found) %>%
+  summarise(counts=length(otu)) %>%
+  group_by(total_presence) %>%
+  mutate(tot_counts=sum(counts),
+         rel_contribution=counts/tot_counts)
+```
+
+```{r}
+##*********************************
+#Sloan neutral model 
+spp=t(otu_rare.S2)
+spp = as.data.frame(spp)
+taxon=as.vector(size_occ$last_taxon)
+
+# Models for the whole community
+# Load sncm.fit.R 
+# The following will fail if rarefaction isn't done - low abundance samples must be removed.
+library(minpack.lm)
+library(Hmisc)
+obs.np=sncm.fit(spp, taxon=F, stats=FALSE, pool=NULL) # All data is there except the "y" column which is all NAs
+sta.np=sncm.fit(spp, taxon, stats=TRUE, pool=NULL)
+sta.np.16S <- sta.np
+
+above.pred=sum(obs.np$freq > (obs.np$pred.upr), na.rm=TRUE)/sta.np$Richness
+below.pred=sum(obs.np$freq < (obs.np$pred.lwr), na.rm=TRUE)/sta.np$Richness
+
+ap = obs.np$freq > (obs.np$pred.upr)
+bp = obs.np$freq < (obs.np$pred.lwr)
+
+Predict <- obs.np
+Predict$otu <- rownames(Predict)
+UpPredictOTU <- unique(Predict$otu[ap==TRUE])
+DownPedictedOTU <- unique(Predict$otu[bp==TRUE])
+
+# Save data frames for making combined plots later
+#saveRDS(combined_occ_data, "combined_occ_data_16S.RDS")
+#saveRDS(obs.np, "obs.np.16S.RDS")
+#saveRDS(sta.np.16S, "sta.np.16S.RDS")
+
+##### Bulk #####
+#Sloan neutral model 
+spp=t(otu_rare.bulk)
+spp = as.data.frame(spp)
+taxon=as.vector(size_occ$last_taxon)
+
+# Models for the whole community
+# Load sncm.fit.R 
+# The following will fail if rarefaction isn't done - low abundance samples must be removed.
+library(minpack.lm)
+library(Hmisc)
+obs.np=sncm.fit(spp, taxon=F, stats=FALSE, pool=NULL) # All data is there except the "y" column which is all NAs
+sta.np=sncm.fit(spp, taxon, stats=TRUE, pool=NULL)
+sta.np.16S <- sta.np
+
+above.pred=sum(obs.np$freq > (obs.np$pred.upr), na.rm=TRUE)/sta.np$Richness
+below.pred=sum(obs.np$freq < (obs.np$pred.lwr), na.rm=TRUE)/sta.np$Richness
+
+ap = obs.np$freq > (obs.np$pred.upr)
+bp = obs.np$freq < (obs.np$pred.lwr)
+
+Predict <- obs.np
+Predict$otu <- rownames(Predict)
+UpPredictOTU <- unique(Predict$otu[ap==TRUE])
+DownPedictedOTU <- unique(Predict$otu[bp==TRUE])
+```
+
+```{r FIGURE}
+
+# Fig 
+ggplot(data=combined_occ_data, aes(x=abun, y=occ)) +
+  theme_bw()+
+  geom_point(pch=21,  size=3, aes(fill=found)) +
+  geom_line(color='black', data=obs.np, size=2, aes(y=obs.np$freq.pred, x=log10(obs.np$p))) +
+  geom_line(color='black', lty='twodash', size=1, data=obs.np, aes(y=obs.np$pred.upr, x=log10(obs.np$p)))+
+  geom_line(color='black', lty='twodash', size=1, data=obs.np, aes(y=obs.np$pred.lwr, x=log10(obs.np$p)))+
+  scale_fill_manual(aes(breaks = found), values=c('green', 'orange','purple','lightgrey')) +
+  xlim(-6,-1.5)+
+  labs(x=paste("log10(mean abundance)\n (n=",sta.np.16S$Richness," OTUs)", sep=''), y=paste("Occupancy (n=",sta.np.16S$Samples," samples)",sep=''), fill='Genotype') +
+  theme(legend.position="top",
+        panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))+
+  guides(fill = guide_legend(override.aes = list(alpha=1)),
+         fill = guide_legend(title=NULL))
+
+ggplot(data=combined_occ_data, aes(x=abun, y=occ)) +
+  theme_bw()+
+  geom_point(pch=21,  size=3, aes(fill=found)) +
+  geom_line(color='black', data=obs.np, size=2, aes(y=obs.np$freq.pred, x=log10(obs.np$p))) +
+  geom_line(color='black', lty='twodash', size=1, data=obs.np, aes(y=obs.np$pred.upr, x=log10(obs.np$p)))+
+  geom_line(color='black', lty='twodash', size=1, data=obs.np, aes(y=obs.np$pred.lwr, x=log10(obs.np$p)))+
+  scale_fill_manual(aes(breaks = found), values=c('green', 'orange','purple','lightgrey')) +
+  xlim(-6,-1.5)+
+  labs(x=paste("log10(mean abundance)\n (n=",sta.np.16S$Richness," OTUs)", sep=''), y=paste("Occupancy (n=",sta.np.16S$Samples," samples)",sep=''), fill='Genotype') +
+  theme(legend.position="top",
+        panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))+
+  guides(fill = guide_legend(override.aes = list(alpha=1)),
+         fill = guide_legend(title=NULL))
+
+```
+
+## CHAPTER 6: Co-occurance
+Goal: Testing out the co-occurance networks by single check line, and then by all lines across locations.
+Using the MicroEco approach in the tutorial chapter 6.2
+```{r Co-occurance Networks testing}
+library(BiocManager)
+library(microeco)
+library(phyloseq)
+library(file2meco)
+library(igraph)
+library(ggraph)
+library(rgexf)
+
+library(ggnetwork)
+library(phyloseqGraphTest)
+
+View(sample_data(ps1))
+
+## PHYLOSMITH
+library(remotes)
+remotes::install_github('schuyler-smith/phylosmith')
+library(phylosmith)
+co_occurrence_network(checks, treatment = NULL, subset = NULL, co_occurrence_table = NULL, classification = NULL, node_colors = 'default', cluster = FALSE, cluster_colors = 'default', buffer = 0.5)
+
+
+
+## PHYLOSEQ APPROACH (Using bioconductor workflow)
+net = make_network(ps1, max.dist = 0.5)
+sampledata = data.frame(sample_data(ps1))
+V(net)
+
+sampledata
+V(net)$Line = sampledata[names(V(net)),"Line"]
+V(net)$Location = sampledata[names(V(net)),"Location"]
+V(net)
+ggplot(net, aes(x = x, y = y, xend = xend, yend = yend), layout = "fruchtermanreingold") + 
+  geom_edges(color = "darkgray") +
+  geom_nodes(aes(color = Line, shape = Location),  size = 3 ) +
+  theme(axis.text = element_blank(), axis.title = element_blank(),
+        legend.key.height = unit(0.5,"line")) +
+  guides(col = guide_legend(override.aes = list(size = .5)))
+
+
+## MICROECO APPROACH (Using microeco tutorial)
+# Comparing all check lines across locyears. There's only 104 nodes for some reason
+checks = subset_samples(ps1, BreedingProgram == "check")
+checks = phyloseq2meco(checks)
+
+t1 <- trans_network$new(dataset = checks, cor_method = "spearman", filter_thres = 0.001) # "135 features remaining" losing everything here?
+t1$cal_network(COR_cut = 0.1) # Causing all but 104 nodes to disappear? optimal COR is ~0.35
+t1$cal_module(method = "cluster_fast_greedy")
+
+t1$save_network(filepath = "network.test.gexf")
+
+View(t1$res_node_table)
+View(t1$tax_table)
+
+
+# All Lines
+t.all = trans_network$new(dataset = phyloseq2meco(ps1), cor_method = "spearman", filter_thres = 0.001)
+t.all$cal_network(COR_cut = 0.1)
+t.all$cal_module(method = "cluster_fast_greedy")
+t.all$save_network(filepath = "network.test.all.gexf")
+
+```
+
+## CHAPTER 6: APPENDICES
+
+### APPENDIX 1: Random Forest
+
+I first ran random forest across all locations, but for the GWAS paper we are ignoring Hawaii. This should be more useful in my microbiome paper. 
+```{r Random Forest of taxa across all locations, fig.width=12, fig.height=5}
+# Create microEco object from ps1
+meF = phyloseq2meco(ps1)
+meF$sample_table = subset(meF$sample_table, Line != "Bulk")
+meFg = meF$merge_taxa(taxa = "Genus")
+meFg$tax_table$Genus = substr(meFg$tax_table$Genus,4,length(meFg$tax_table$Genus)) # remove g__ from genera
+meFg$tax_table$Genus = ifelse(nchar(meFg$tax_table$Genus)>0,yes = meFg$tax_table$Genus,no = "NA") # make blanks = NA
+meFg$tax_table = subset(meFg$tax_table, Genus != "NA")
+meFg$tax_table$Genus[meFg$tax_table$Genus == "Allorhizobium-Neorhizobium-Pararhizobium-Rhizobium"] = "Allo-Neo-Para-Rhizobium"
+meFg$cal_abund()
+meFg$sample_table$LocYear = paste(meFg$sample_table$Year, meFg$sample_table$Location, sep = "_")
+
+
+####
+# RF Across all taxa level
+####
+d = trans_diff$new(dataset = meFg, method = "rf", group = "Location", alpha = 0.01, lefse_subgroup = NULL, taxa_level = "Genus", filter_thres = )
+#saveRDS(d, "rf_locYear.RDS")
+d = readRDS("rf_locYear.RDS")
+
+
+p1 = d$plot_diff_abund(add_sig = F, select_taxa = d$plot_diff_bar_taxa, group_order = c("BZ","MO","SD","HI")) + ggplot2::ylab("Relative abundance (%)") +
+  scale_fill_manual(name = "Location", 
+     labels = c("HI","SD","cntrMT","swMT"),
+     values = c("goldenrod1","seagreen3","darkorange","skyblue")) +
+  scale_color_manual(name = "Location",
+     labels = c("HI","SD","cntrMT","swMT"),
+     values = c("goldenrod1","seagreen3","darkorange","skyblue"))
+p2 = d$plot_diff_bar(use_number = 1:20, width = 0.8, group_order = c("BZ","MO","SD","HI")) +
+scale_fill_manual(name = "Location", 
+     labels = c("swMT","cntrMT","SD","HI"),
+     values = c("skyblue","darkorange","seagreen3","goldenrod1")) +
+  scale_color_manual(name = "Location",
+     labels = c("swMT","cntrMT","SD","HI"),
+     values = c("skyblue","darkorange","seagreen3","goldenrod1"))
+p1
+p2
+grid.arrange(p2 + theme(legend.position = "none"),p1, nrow = 1)
+
+
+####
+# RF Across all FAPROTAX functions
+####
+func = trans_func$new(meFg)
+func$cal_spe_func(prok_database = "FAPROTAX") # Run function assignment
+
+# calculate the percentages for communities
+# here consider the abundance
+func$cal_spe_func_perc(abundance_weighted = TRUE)
+func$trans_spe_func_perc()
+
+meFg2 = clone(meFg)
+# transpose res_spe_func_perc to be a data.frame like taxonomic abundance
+tmp <- as.data.frame(t(func$res_spe_func_perc), check.names = FALSE)
+# assign the table back to taxa_abund list for further analysis
+meFg2$taxa_abund$func <- tmp
+meFg2$sample_table$LocYear = paste(meFg2$sample_table$Year,meFg2$sample_table$Location, sep = "_")
+
+# select the "func" in taxa_abund list in trans_diff
+t2 <- trans_diff$new(dataset = meFg2, method = "rf", group = "Location", taxa_level = "func")
+f2 = t2$plot_diff_abund(add_sig = F, group_order = c("BZ","MO","SD","HI")) + ggplot2::ylab("Relative abundance (%)") +
+  scale_fill_manual(name = "Location", 
+     labels = c("HI","SD","cntrMT","swMT"),
+     values = c("goldenrod1","seagreen3","darkorange","skyblue")) +
+  scale_color_manual(name = "Location",
+     labels = c("HI","SD","cntrMT","swMT"),
+     values = c("goldenrod1","seagreen3","darkorange","skyblue"))
+
+f1 = t2$plot_diff_bar(use_number = 1:20, width = 0.8, group_order = c("BZ","MO","SD","HI")) +
+  scale_fill_manual(name = "Location", 
+     labels = c("swMT","cntrMT","SD","HI"),
+     values = c("skyblue","darkorange","seagreen3","goldenrod1")) +
+  scale_color_manual(name = "Location",
+     labels = c("swMT","cntrMT","SD","HI"),
+     values = c("skyblue","darkorange","seagreen3","goldenrod1"))
+f1
+grid.arrange(f1 + theme(legend.position = "none"),f2,nrow = 1)
+
+```
+ 
